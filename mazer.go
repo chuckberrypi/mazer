@@ -1,23 +1,13 @@
 package main
 
 import (
-	"bufio"
-	"compress/gzip"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/gif"
-	"io"
-	"io/ioutil"
 	"log"
-	"net/http"
-	"net/url"
 	"os"
-	"strconv"
-	"strings"
-
-	"github.com/anaskhan96/soup"
 )
 
 //direction values should only be up, down, left, or right
@@ -30,12 +20,21 @@ const (
 	left
 )
 
+var (
+	red = color.RGBA{R: 255, G: 0, B: 0, A: 0}
+)
+
+type mazeError struct {
+	M mazePath
+	E error
+}
+
 type position struct {
 	X, Y int
 }
 
 type mazePath struct {
-	Maze      *image.RGBA
+	Image     *image.RGBA
 	History   []position
 	paths     []direction
 	LineColor color.RGBA
@@ -54,40 +53,178 @@ func main() {
 
 	initialMazeImage := trimMaze(mazeGif)
 
-	output, err := os.Create("./unsolved_maze.gif")
+	positions := allPoints(initialMazeImage)
+
+	fmt.Printf("Positions: \n")
+
+	for _, p := range positions {
+		fmt.Println(p)
+	}
+
+	fmt.Printf("initialMazeImage.Bounds(): %v\n", initialMazeImage.Bounds())
+
+	drawAllPoints(initialMazeImage, positions)
+
+	saveImageAsGif(initialMazeImage, "./unsolved_maze.gif")
+
+	pMap := make(map[position][]string)
+
+	initialMaze := firstMazePath(initialMazeImage)
+
+	initialMaze.History = append(initialMaze.History, position{X: 15, Y: 5})
+
+	for _, p := range positions {
+		pMap[position{X: ((p.X - 5) / 10) + 1, Y: ((p.Y - 5) / 10) + 1}] = dirsToStrings(options(initialMaze, p))
+	}
+
+	fmt.Println(pMap)
+	c := make(chan mazeError)
+	deadChannel := deadEndNames()
+
+	solveMaze(initialMaze, c, deadChannel)
+
+	solution := <-c
+
+	if solution.E != nil {
+		log.Fatal("There does not seem to be a solution :(")
+	}
+
+	finalImage := drawPath(solution.M)
+
+	saveImageAsGif(finalImage, "./solved_maze.gif")
+
+}
+
+func dirsToStrings(dir []direction) []string {
+	str := make([]string, 0)
+	for _, d := range dir {
+		str = append(str, sPrintDirection(d))
+	}
+	return str
+}
+
+func saveImageAsGif(i *image.RGBA, n string) {
+	output, err := os.Create(n)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer output.Close()
 
-	initialMazeImage.Set(5, 5, color.RGBA{R: 255, G: 0, B: 0, A: 255})
-
-	gif.Encode(output, initialMazeImage, nil)
-
-	initialMaze := firstMazePath(initialMazeImage)
-
-	solvedMaze, err := solveMaze(initialMaze)
-
+	gif.Encode(output, i, nil)
 }
 
-func solveMaze(m mazePath) (mazePath, error) {
+func deadEndNames() chan string {
+	c := make(chan string)
+	deadNum := 0
+	go func(ch chan string) {
+		for {
+			deadNum++
+			ch <- fmt.Sprintf("dead_end%v.gif", deadNum)
+		}
+	}(c)
+	return c
+}
+
+func sPrintDirection(d direction) string {
+	switch d {
+	case up:
+		return "up"
+	case down:
+		return "down"
+	case right:
+		return "right"
+	default:
+		return "left"
+	}
+}
+
+func allPoints(i *image.RGBA) []position {
+	p := make([]position, 0)
+	for y := 5; y < i.Bounds().Max.Y; y += 10 {
+		for x := 5; x < i.Rect.Bounds().Max.X; x += 10 {
+			p = append(p, position{X: x, Y: y})
+		}
+	}
+	return p
+}
+
+func drawAllPoints(i *image.RGBA, p []position) {
+	for _, point := range p {
+		i.Set(point.X, point.Y, red)
+	}
+}
+
+func drawPath(m mazePath) *image.RGBA {
+	retImage := copyRGBA(m.Image)
+
+	historyLen := len(m.History)
+	for i := 1; i < historyLen; i++ {
+		currentPosition := m.History[i]
+		lastPosition := m.History[i-1]
+		dir := directionTraveled(lastPosition, currentPosition)
+		draw(lastPosition, retImage, dir)
+	}
+
+	return retImage
+}
+
+func draw(start position, i *image.RGBA, dir direction) {
+	pos := start
+	i.Set(start.X, start.Y, color.RGBA{R: 255, G: 0, B: 0, A: 0})
+	for g := 0; g < 10; g++ {
+		pos = moveOne(pos, dir)
+		i.Set(pos.X, pos.Y, color.RGBA{R: 255, G: 0, B: 0, A: 0})
+	}
+}
+
+func moveOne(p position, d direction) position {
+	pos := p
+	switch d {
+	case up:
+		pos.Y--
+	case down:
+		pos.Y++
+	case right:
+		pos.X++
+	default:
+		pos.X--
+	}
+	return pos
+}
+
+func solveMaze(m mazePath, mc chan mazeError, deadCh chan string) {
 	var solvedMaze mazePath
 	if exitFound(m) {
-		return m, nil
+		mc <- mazeError{M: m, E: nil}
 	} else if len(m.paths) <= 0 {
-		return solvedMaze, errors.New("No paths left")
+		deadEnd(m, deadCh)
+		mc <- mazeError{M: solvedMaze, E: errors.New("No paths left")}
 	} else {
-		for len(m.paths) > 0 {
-			dir := m.paths[len(m.paths)-1]
-			m.paths = m.paths[:len(m.paths)-1]
+		c := make(chan mazeError)
+		pathLen := len(m.paths)
+		for i := 0; i < pathLen; i++ {
+			dir := m.paths[i]
 			nextMazePath := nextMazePath(m, dir)
-			solvedMaze, err := solveMaze(nextMazePath)
-			if err == nil {
-				break
+			go solveMaze(nextMazePath, c, deadCh)
+		}
+		badResults := make([]mazeError, 0)
+		for i := 0; i < pathLen; i++ {
+			result := <-c
+			if result.E == nil {
+				mc <- result
+			} else {
+				badResults = append(badResults, result)
 			}
 		}
-		return solvedMaze, err
+		for _, r := range badResults {
+			mc <- r
+		}
 	}
+}
+
+func deadEnd(m mazePath, dc chan string) {
+	//TODO function that saves the image of an unsolved maze to make an animated gif
+	fmt.Println(<-dc)
 }
 
 func firstMazePath(i *image.RGBA) mazePath {
@@ -97,13 +234,13 @@ func firstMazePath(i *image.RGBA) mazePath {
 	maze := i
 	bkgColor, lineColor := getBkgColorLineColor(i)
 	mp := mazePath{
-		Maze:      maze,
+		Image:     maze,
 		History:   history,
 		paths:     paths, //need to calculate actual opptions after
 		LineColor: lineColor,
 		BkgColor:  bkgColor,
 	}
-	mp.paths = append(mp.paths, options(mp)...)
+	mp.paths = append(mp.paths, options(mp, mp.History[len(mp.History)-1])...)
 	return mp
 }
 
@@ -113,22 +250,22 @@ func nextMazePath(m mazePath, d direction) mazePath {
 	nextPos := nextPosition(m, d)
 	history = append(history, m.History...)
 	history = append(history, nextPos)
-	maze := copyRGBA(m.Maze)
+	maze := m.Image
 	mp := mazePath{
-		Maze:      maze,
+		Image:     maze,
 		History:   history,
 		paths:     paths,
 		LineColor: m.LineColor,
 		BkgColor:  m.BkgColor,
 	}
-	mp.paths = append(m.paths, options(mp)...)
+	mp.paths = append(m.paths, options(mp, mp.History[len(mp.History)-1])...)
 	return mp
 }
 
 func exitFound(m mazePath) bool {
 	currentPosition := m.History[len(m.History)-1]
 	if directionSliceContains(m.paths, left) {
-		if m.Maze.Bounds().Max.X == currentPosition.X+5 {
+		if m.Image.Bounds().Max.X == currentPosition.X+5 {
 			return true
 		}
 	}
@@ -162,27 +299,27 @@ func nextPosition(m mazePath, d direction) position {
 	return pos
 }
 
-func options(m mazePath) []direction {
+func options(m mazePath, p position) []direction {
 
 	directions := make([]direction, 0)
-	currentPosition := m.History[len(m.History)-1]
+	currentPosition := p
 
-	if m.Maze.At(currentPosition.X+5, currentPosition.Y) != m.LineColor {
+	if m.Image.At(currentPosition.X+5, currentPosition.Y) != m.LineColor {
 		directions = append(directions, right)
 		fmt.Println("appending right")
 	}
 
-	if m.Maze.At(currentPosition.X-5, currentPosition.Y) != m.LineColor && len(m.History) != 1 {
+	if m.Image.At(currentPosition.X-5, currentPosition.Y) != m.LineColor {
 		directions = append(directions, left)
 		fmt.Println("appending left")
 	}
 
-	if m.Maze.At(currentPosition.X, currentPosition.Y-5) != m.LineColor {
+	if m.Image.At(currentPosition.X, currentPosition.Y-5) != m.LineColor {
 		directions = append(directions, up)
 		fmt.Println("appending up")
 	}
 
-	if m.Maze.At(currentPosition.X, currentPosition.Y+5) != m.LineColor {
+	if m.Image.At(currentPosition.X, currentPosition.Y+5) != m.LineColor {
 		directions = append(directions, down)
 		fmt.Println("appending down")
 	}
@@ -203,6 +340,10 @@ func options(m mazePath) []direction {
 
 	directions = filterDirections(directions, func(n direction) bool {
 		if n == disallowed {
+			return false
+		}
+
+		if len(m.History) == 1 && n == left {
 			return false
 		}
 		return true
@@ -303,144 +444,4 @@ func getBkgColorLineColor(i *image.RGBA) (bkgColor, lineColor color.RGBA) {
 
 	}
 	return
-}
-
-func getMaze() *os.File {
-	reader := bufio.NewReader(os.Stdin)
-
-	fmt.Printf("Rows: ")
-	entry, _ := reader.ReadString('\n')
-
-	height, err := strconv.Atoi(strings.TrimRight(entry, "\n"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Columns: ")
-	entry, _ = reader.ReadString('\n')
-
-	width, err := strconv.Atoi(strings.TrimRight(entry, "\n"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	client := &http.Client{}
-
-	headerMap := map[string]string{
-		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-		"Accept-Encoding":           "gzip, deflate",
-		"Accept-Language":           "en-US,en;q=0.9",
-		"Cache-Control":             "max-age=0",
-		"Connection":                "keep-alive",
-		"Content-Length":            "45",
-		"Content-Type":              "application/x-www-form-urlencoded",
-		"Host":                      "www.delorie.com",
-		"Origin":                    "http://www.delorie.com",
-		"Referer":                   "http://www.delorie.com/game-room/mazes/genmaze.cgi",
-		"Upgrade-Insecure-Requests": "1",
-		"User-Agent":                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.109 Safari/537.36",
-	}
-
-	form := url.Values{}
-	form.Add("cols", strconv.Itoa(width))
-	form.Add("rows", strconv.Itoa(height))
-
-	form.Add("type", "gif")
-
-	req, err := http.NewRequest("POST", "http://www.delorie.com/game-room/mazes/genmaze.cgi", strings.NewReader(form.Encode()))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for key, val := range headerMap {
-		req.Header.Add(key, val)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	gzipReader, err4 := gzip.NewReader(resp.Body)
-	if err4 != nil {
-		log.Fatal(err)
-	}
-
-	bodyBytes, err2 := ioutil.ReadAll(gzipReader)
-	if err2 != nil {
-		log.Fatal(err)
-	}
-
-	bodyString := string(bodyBytes)
-
-	bodySoup := soup.HTMLParse(bodyString)
-
-	baseURL := strings.TrimRight(bodySoup.Find("base").Attrs()["href"], "genmaze.cgi")
-	fmt.Printf("Base url: %s\n", baseURL)
-
-	mapURL := baseURL + bodySoup.Find("img").Attrs()["src"]
-
-	mazeResp, err := http.Get(mapURL)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	file, err := os.Create("./maze.gif")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	defer file.Close()
-
-	_, err = io.Copy(file, mazeResp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	file, err = os.Open("./maze.gif")
-	return file
-
-}
-
-func trimMaze(i image.Image) *image.RGBA {
-
-	imageAlphaPoint := getFirstLinePoint(i)
-	imageOmegaPoint := getLastLinePoint(i)
-
-	// iWidth := i.Bounds().Max.X - i.Bounds().Min.X
-	// iHeight := i.Bounds().Max.Y - i.Bounds().Min.Y
-
-	// xShift := (imageAlphaPoint.X - i.Bounds().Min.X) + (i.Bounds().Max.X - imageOmegaPoint.X)
-	// yShift := (imageAlphaPoint.Y - i.Bounds().Min.Y) + (i.Bounds().Max.Y - imageOmegaPoint.Y)
-
-	retImage := image.NewRGBA(image.Rectangle{image.Point{0, 0}, image.Point{X: (imageOmegaPoint.X - imageAlphaPoint.X) + 1, Y: (imageOmegaPoint.Y - imageAlphaPoint.Y) + 1}})
-	for x := retImage.Bounds().Min.X; x <= retImage.Bounds().Max.X+1; x++ {
-		for y := retImage.Bounds().Min.Y; y <= retImage.Bounds().Max.Y+1; y++ {
-			retImage.Set(x, y, i.At(x+(imageAlphaPoint.X-i.Bounds().Min.X), y+(imageAlphaPoint.Y-i.Bounds().Min.Y)))
-		}
-	}
-	return retImage
-}
-
-func getFirstLinePoint(i image.Image) image.Point {
-	clr := i.At(i.Bounds().Min.X, i.Bounds().Min.Y)
-	for x := i.Bounds().Min.X; x < i.Bounds().Max.X; x++ {
-		for y := i.Bounds().Min.Y; y < i.Bounds().Max.Y; y++ {
-			if i.At(x, y) != clr {
-				return image.Point{X: x, Y: y}
-			}
-		}
-	}
-	return image.Point{0, 0}
-}
-
-func getLastLinePoint(i image.Image) image.Point {
-	clr := i.At(i.Bounds().Min.X, i.Bounds().Min.Y)
-	for x := i.Bounds().Max.X - 1; x > i.Bounds().Min.X; x-- {
-		for y := i.Bounds().Max.Y - 1; y > i.Bounds().Min.Y; y-- {
-			if i.At(x, y) != clr {
-				return image.Point{X: x, Y: y}
-			}
-		}
-	}
-	return image.Point{0, 0}
 }
