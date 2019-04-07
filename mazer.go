@@ -114,7 +114,9 @@ func main() {
 func makeGIF(images []*image.RGBA) gif.GIF {
 	gifImages := make([]*image.Paletted, 0)
 	delays := make([]int, 0)
-	for _, i := range images {
+	fmt.Printf("There are %v images to convert to a GIF.\n", len(images))
+	for n, i := range images {
+		fmt.Printf("Appending RGBA no. %v to slice of *image.Paletted\n", n)
 		gifImages = append(gifImages, rgbaToPalette(i))
 	}
 	for i := 0; i < len(gifImages); i++ {
