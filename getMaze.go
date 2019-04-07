@@ -23,14 +23,14 @@ func getMaze() *os.File {
 	fmt.Printf("Rows: ")
 	entry, _ := reader.ReadString('\n')
 
-	height, err := strconv.Atoi(strings.TrimRight(entry, "\n"))
+	height, err := strconv.Atoi(strings.Trim(entry, " \n\t"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Columns: ")
 	entry, _ = reader.ReadString('\n')
 
-	width, err := strconv.Atoi(strings.TrimRight(entry, "\n"))
+	width, err := strconv.Atoi(strings.Trim(entry, " \n\t"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -87,7 +87,6 @@ func getMaze() *os.File {
 	bodySoup := soup.HTMLParse(bodyString)
 
 	baseURL := strings.TrimRight(bodySoup.Find("base").Attrs()["href"], "genmaze.cgi")
-	fmt.Printf("Base url: %s\n", baseURL)
 
 	mapURL := baseURL + bodySoup.Find("img").Attrs()["src"]
 
