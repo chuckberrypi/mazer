@@ -20,8 +20,11 @@ const (
 	left
 )
 
+var throttle chan struct{}
+
 var (
-	red = color.RGBA{R: 255, G: 0, B: 0, A: 0}
+	red  = color.RGBA{R: 255, G: 0, B: 0, A: 0}
+	blue = color.RGBA{R: 0, G: 0, B: 255, A: 0}
 )
 
 type mazeError struct {
@@ -42,6 +45,7 @@ type mazePath struct {
 }
 
 func main() {
+	throttle = make(chan struct{}, 30)
 
 	file := getMaze()
 	defer file.Close()
@@ -53,31 +57,14 @@ func main() {
 
 	initialMazeImage := trimMaze(mazeGif)
 
-	positions := allPoints(initialMazeImage)
-
 	fmt.Printf("Positions: \n")
-
-	for _, p := range positions {
-		fmt.Println(p)
-	}
 
 	fmt.Printf("initialMazeImage.Bounds(): %v\n", initialMazeImage.Bounds())
 
-	drawAllPoints(initialMazeImage, positions)
+	initialMaze := firstMazePath(initialMazeImage)
 
 	saveImageAsGif(initialMazeImage, "./unsolved_maze.gif")
 
-	pMap := make(map[position][]string)
-
-	initialMaze := firstMazePath(initialMazeImage)
-
-	initialMaze.History = append(initialMaze.History, position{X: 15, Y: 5})
-
-	for _, p := range positions {
-		pMap[position{X: ((p.X - 5) / 10) + 1, Y: ((p.Y - 5) / 10) + 1}] = dirsToStrings(options(initialMaze, p))
-	}
-
-	fmt.Println(pMap)
 	c := make(chan mazeError)
 	deadChannel := deadEndNames()
 
@@ -87,12 +74,19 @@ func main() {
 
 	if solution.E != nil {
 		log.Fatal("There does not seem to be a solution :(")
+	} else {
+		fmt.Println("Hunky Dory")
 	}
 
 	finalImage := drawPath(solution.M)
 
 	saveImageAsGif(finalImage, "./solved_maze.gif")
 
+}
+
+func printMazeHistoryandPaths(m mazePath) {
+	fmt.Printf("m.History: %v\n", m.History)
+	fmt.Printf("m.paths: %v\n", dirsToStrings(m.paths))
 }
 
 func dirsToStrings(dir []direction) []string {
@@ -104,6 +98,7 @@ func dirsToStrings(dir []direction) []string {
 }
 
 func saveImageAsGif(i *image.RGBA, n string) {
+	throttle <- struct{}{}
 	output, err := os.Create(n)
 	if err != nil {
 		log.Fatal(err)
@@ -111,6 +106,7 @@ func saveImageAsGif(i *image.RGBA, n string) {
 	defer output.Close()
 
 	gif.Encode(output, i, nil)
+	<-throttle
 }
 
 func deadEndNames() chan string {
@@ -138,20 +134,21 @@ func sPrintDirection(d direction) string {
 	}
 }
 
-func allPoints(i *image.RGBA) []position {
-	p := make([]position, 0)
-	for y := 5; y < i.Bounds().Max.Y; y += 10 {
-		for x := 5; x < i.Rect.Bounds().Max.X; x += 10 {
-			p = append(p, position{X: x, Y: y})
+func drawAllPoints(m mazePath, points []position) {
+	for _, point := range points {
+		if endPoint(m, point) {
+			m.Image.Set(point.X, point.Y, blue)
+		} else {
+			m.Image.Set(point.X, point.Y, red)
 		}
 	}
-	return p
 }
 
-func drawAllPoints(i *image.RGBA, p []position) {
-	for _, point := range p {
-		i.Set(point.X, point.Y, red)
+func endPoint(m mazePath, p position) bool {
+	if p.X+5 == m.Image.Bounds().Max.X-1 && m.Image.At(p.X+5, p.Y) != m.LineColor {
+		return true
 	}
+	return false
 }
 
 func drawPath(m mazePath) *image.RGBA {
@@ -161,7 +158,7 @@ func drawPath(m mazePath) *image.RGBA {
 	for i := 1; i < historyLen; i++ {
 		currentPosition := m.History[i]
 		lastPosition := m.History[i-1]
-		dir := directionTraveled(lastPosition, currentPosition)
+		dir := directionTraveled(currentPosition, lastPosition)
 		draw(lastPosition, retImage, dir)
 	}
 
@@ -195,6 +192,7 @@ func moveOne(p position, d direction) position {
 func solveMaze(m mazePath, mc chan mazeError, deadCh chan string) {
 	var solvedMaze mazePath
 	if exitFound(m) {
+		fmt.Printf("Exit was found...\n")
 		mc <- mazeError{M: m, E: nil}
 	} else if len(m.paths) <= 0 {
 		deadEnd(m, deadCh)
@@ -202,29 +200,33 @@ func solveMaze(m mazePath, mc chan mazeError, deadCh chan string) {
 	} else {
 		c := make(chan mazeError)
 		pathLen := len(m.paths)
+
 		for i := 0; i < pathLen; i++ {
 			dir := m.paths[i]
-			nextMazePath := nextMazePath(m, dir)
-			go solveMaze(nextMazePath, c, deadCh)
+			nextMaze := nextMazePath(m, dir)
+			go solveMaze(nextMaze, c, deadCh)
 		}
-		badResults := make([]mazeError, 0)
+
 		for i := 0; i < pathLen; i++ {
 			result := <-c
 			if result.E == nil {
 				mc <- result
-			} else {
-				badResults = append(badResults, result)
 			}
 		}
-		for _, r := range badResults {
-			mc <- r
-		}
+		mc <- mazeError{M: solvedMaze, E: errors.New("No joy this way")}
 	}
 }
 
 func deadEnd(m mazePath, dc chan string) {
 	//TODO function that saves the image of an unsolved maze to make an animated gif
-	fmt.Println(<-dc)
+	name := "deadends/" + <-dc
+
+	pathImage := drawPath(m)
+
+	saveImageAsGif(pathImage, name)
+
+	fmt.Printf("dead end func: %v\n", name)
+	printMazeHistoryandPaths(m)
 }
 
 func firstMazePath(i *image.RGBA) mazePath {
@@ -236,11 +238,16 @@ func firstMazePath(i *image.RGBA) mazePath {
 	mp := mazePath{
 		Image:     maze,
 		History:   history,
-		paths:     paths, //need to calculate actual opptions after
+		paths:     paths,
 		LineColor: lineColor,
 		BkgColor:  bkgColor,
 	}
-	mp.paths = append(mp.paths, options(mp, mp.History[len(mp.History)-1])...)
+	mp.paths = filterDirections(append(mp.paths, options(mp, mp.History[len(mp.History)-1])...), func(d direction) bool {
+		if d == left {
+			return false
+		}
+		return true
+	})
 	return mp
 }
 
@@ -250,31 +257,41 @@ func nextMazePath(m mazePath, d direction) mazePath {
 	nextPos := nextPosition(m, d)
 	history = append(history, m.History...)
 	history = append(history, nextPos)
-	maze := m.Image
 	mp := mazePath{
-		Image:     maze,
+		Image:     m.Image,
 		History:   history,
 		paths:     paths,
 		LineColor: m.LineColor,
 		BkgColor:  m.BkgColor,
 	}
-	mp.paths = append(m.paths, options(mp, mp.History[len(mp.History)-1])...)
+	mp.paths = append(mp.paths, options(mp, mp.History[len(mp.History)-1])...)
+	mp = cullPaths(mp)
+	return mp
+}
+
+func cullPaths(m mazePath) mazePath {
+	mp := m
+	incoming := incomingDirection(m)
+	mp.paths = filterDirections(m.paths, func(d direction) bool {
+		if d == incoming {
+			return false
+		}
+		return true
+	})
 	return mp
 }
 
 func exitFound(m mazePath) bool {
 	currentPosition := m.History[len(m.History)-1]
-	if directionSliceContains(m.paths, left) {
-		if m.Image.Bounds().Max.X == currentPosition.X+5 {
-			return true
-		}
+	if directionSliceContains(m.paths, right) && m.Image.Bounds().Max.X-1 == currentPosition.X+5 {
+		return true
 	}
 	return false
 }
 
-func directionSliceContains(ints []direction, n direction) bool {
-	for _, num := range ints {
-		if num == n {
+func directionSliceContains(dirs []direction, n direction) bool {
+	for _, dir := range dirs {
+		if dir == n {
 			return true
 		}
 	}
@@ -299,55 +316,25 @@ func nextPosition(m mazePath, d direction) position {
 	return pos
 }
 
-func options(m mazePath, p position) []direction {
+func options(m mazePath, currentPosition position) []direction {
 
 	directions := make([]direction, 0)
-	currentPosition := p
 
 	if m.Image.At(currentPosition.X+5, currentPosition.Y) != m.LineColor {
 		directions = append(directions, right)
-		fmt.Println("appending right")
 	}
 
 	if m.Image.At(currentPosition.X-5, currentPosition.Y) != m.LineColor {
 		directions = append(directions, left)
-		fmt.Println("appending left")
 	}
 
 	if m.Image.At(currentPosition.X, currentPosition.Y-5) != m.LineColor {
 		directions = append(directions, up)
-		fmt.Println("appending up")
 	}
 
 	if m.Image.At(currentPosition.X, currentPosition.Y+5) != m.LineColor {
 		directions = append(directions, down)
-		fmt.Println("appending down")
 	}
-
-	incoming := incomingDirection(m)
-	var disallowed direction
-
-	switch incoming {
-	case up:
-		disallowed = down
-	case down:
-		disallowed = up
-	case left:
-		disallowed = right
-	default:
-		disallowed = left
-	}
-
-	directions = filterDirections(directions, func(n direction) bool {
-		if n == disallowed {
-			return false
-		}
-
-		if len(m.History) == 1 && n == left {
-			return false
-		}
-		return true
-	})
 
 	return directions
 }
@@ -364,7 +351,7 @@ func filterDirections(ds []direction, f func(direction) bool) []direction {
 
 func incomingDirection(m mazePath) direction {
 	if len(m.History) == 1 {
-		return right
+		return left
 	} else {
 		currentPosition := m.History[len(m.History)-1]
 		lastPosition := m.History[len(m.History)-2]
@@ -381,15 +368,15 @@ func inBounds(p position, r image.Rectangle) bool {
 
 //direction takes two points and tells you whether the cursor moved
 //up, down, left, or right to get from the first to the second position
-func directionTraveled(first, second position) direction {
-	if second.X == first.X {
-		if second.Y > first.Y {
+func directionTraveled(last, current position) direction {
+	if last.X == current.X {
+		if last.Y > current.Y {
 			return down
 		} else {
 			return up
 		}
 	} else {
-		if second.X > first.X {
+		if last.X > current.X {
 			return right
 		} else {
 			return left
