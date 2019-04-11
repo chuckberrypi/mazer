@@ -20,11 +20,6 @@ const (
 	left
 )
 
-var throttle chan struct{}
-var solution chan *image.RGBA
-var deadEnd chan *image.RGBA
-var node chan *image.RGBA
-
 var (
 	red  = color.RGBA{R: 255, G: 0, B: 0, A: 0}
 	blue = color.RGBA{R: 0, G: 0, B: 255, A: 0}
@@ -52,10 +47,7 @@ func main() {
 	//opens at any time. may not be necessary with new channel
 	//design
 
-	throttle = make(chan struct{}, 30)
-	solution = make(chan *image.RGBA)
-	deadEnd = make(chan *image.RGBA, 100)
-	node = make(chan *image.RGBA, 100)
+	images := make([]*image.RGBA, 0)
 
 	file := getMaze()
 	defer file.Close()
@@ -70,39 +62,18 @@ func main() {
 	initialMaze := firstMazePath(initialMazeImage)
 
 	saveImageAsGif(initialMazeImage, "./unsolved_maze.gif")
-	tc := make(chan bool)
 
-	go solveMaze(initialMaze, tc)
-
-	images := make([]*image.RGBA, 0)
-
-	var im *image.RGBA
-	b := true
-	for b {
-		select {
-		case im = <-node:
-			images = append(images, im)
-		case im = <-deadEnd:
-			images = append(images, im)
-		case im = <-solution:
-			fmt.Println("Solution found.")
-			nodeLen := len(node)
-			for i := 0; i < nodeLen; i++ {
-				images = append(images, <-node)
-			}
-			images = append(images, im)
-			b = false
-		case b = <-tc:
-			if !b {
-				log.Fatal("Program found no solution.")
-				break
-			}
-		}
+	if solveMaze(initialMaze, &images) {
+		fmt.Println("Maze was solved.")
+	} else {
+		fmt.Println("Maze was not solved.")
 	}
 
+	fmt.Printf("Len(images: %v\n", len(images))
+
 	saveImageAsGif(images[len(images)-1], "solved.gif")
-	solvedMotion := makeGIF(images)
-	gifFile, err := os.Create("motionSolve.gif")
+	solvedMotion := makeGIF(&images)
+	gifFile, err := os.Create("serial_motionSolve.gif")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -111,10 +82,10 @@ func main() {
 
 }
 
-func makeGIF(images []*image.RGBA) gif.GIF {
+func makeGIF(images *[]*image.RGBA) gif.GIF {
 	gifImages := make([]*image.Paletted, 0)
 	delays := make([]int, 0)
-	for _, i := range images {
+	for _, i := range *images {
 		gifImages = append(gifImages, rgbaToPalette(i))
 	}
 	for i := 0; i < len(gifImages); i++ {
@@ -155,7 +126,7 @@ func dirsToStrings(dir []direction) []string {
 }
 
 func saveImageAsGif(i *image.RGBA, n string) {
-	throttle <- struct{}{}
+
 	output, err := os.Create(n)
 	if err != nil {
 		log.Fatal(err)
@@ -163,7 +134,7 @@ func saveImageAsGif(i *image.RGBA, n string) {
 	defer output.Close()
 
 	gif.Encode(output, i, nil)
-	<-throttle
+
 }
 
 func deadEndNames() chan string {
@@ -246,40 +217,27 @@ func moveOne(p position, d direction) position {
 	return pos
 }
 
-func solveMaze(m mazePath, tChan chan bool) {
+func solveMaze(m mazePath, images *[]*image.RGBA) bool {
 
-	if len(m.paths) <= 0 {
-		deadEnd <- drawPath(m)
-		tChan <- false
-	} else if !exitFound(m) {
-		//	node <- drawPath(m)
-		tc := make(chan bool)
+	if len(m.paths) <= 0 { //dead end
+		*images = append(*images, drawPath(m))
+		return false
+	} else if !exitFound(m) { // not the solution and not a dead end.
 
 		pathLen := len(m.paths)
 
 		for i := 0; i < pathLen; i++ {
 			dir := m.paths[i]
 			nextMaze := nextMazePath(m, dir)
-			go solveMaze(nextMaze, tc)
-		}
-
-		tflag := true
-
-		for i := 0; i < pathLen; i++ {
-			b := <-tc
-			if b {
-				tChan <- true
-				tflag = false
-				break
+			if solveMaze(nextMaze, images) {
+				return true
 			}
 		}
-		if tflag {
-			tChan <- false
-		}
-	} else {
-		solution <- drawPath(m)
-		tChan <- true
+	} else { //the solution
+		*images = append(*images, drawPath(m))
+		return true
 	}
+	return false
 }
 
 func firstMazePath(i *image.RGBA) mazePath {
