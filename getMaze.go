@@ -17,23 +17,8 @@ import (
 	"github.com/anaskhan96/soup"
 )
 
-func getMaze() *os.File {
-	reader := bufio.NewReader(os.Stdin)
+func getMaze(rows, cols int) *os.File {
 
-	fmt.Printf("Rows: ")
-	entry, _ := reader.ReadString('\n')
-
-	height, err := strconv.Atoi(strings.Trim(entry, " \n\t"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Columns: ")
-	entry, _ = reader.ReadString('\n')
-
-	width, err := strconv.Atoi(strings.Trim(entry, " \n\t"))
-	if err != nil {
-		log.Fatal(err)
-	}
 	client := &http.Client{}
 
 	headerMap := map[string]string{
@@ -52,8 +37,8 @@ func getMaze() *os.File {
 	}
 
 	form := url.Values{}
-	form.Add("cols", strconv.Itoa(width))
-	form.Add("rows", strconv.Itoa(height))
+	form.Add("cols", strconv.Itoa(cols))
+	form.Add("rows", strconv.Itoa(rows))
 
 	form.Add("type", "gif")
 
@@ -110,6 +95,27 @@ func getMaze() *os.File {
 	file, err = os.Open("./maze.gif")
 	return file
 
+}
+
+func getRowsandCols() (rows, cols int) {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Printf("Rows: ")
+	entry, _ := reader.ReadString('\n')
+
+	rows, err := strconv.Atoi(strings.Trim(entry, " \n\t"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Columns: ")
+	entry, _ = reader.ReadString('\n')
+
+	cols, err = strconv.Atoi(strings.Trim(entry, " \n\t"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return rows, cols
 }
 
 func trimMaze(i image.Image) *image.RGBA {
