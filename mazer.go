@@ -8,7 +8,6 @@ import (
 	"image/color"
 	"image/color/palette"
 	"image/gif"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anaskhan96/soup"
 )
@@ -52,41 +52,133 @@ type mazePath struct {
 	BkgColor  color.RGBA
 }
 
+var solvedNameChannel chan string
+var mazeGetThrottle chan struct{}
+var timer chan struct{}
+var mazePathChan chan mazePath
+
 func main() {
+	initializeGlobals()
+	loops := getLoopNum()
+
+	counts := make(map[int]int)
+	longestSlice := 0
+	shortestSlice := 99999999
+
+	//vary the size of the maze to make sure that the website
+	//doesn't just give the same maze multiple times.
+	r := 60
+	for i := 0; i < loops; i++ {
+
+		go getMazePath(r)
+		if r < 57 {
+			r = 60
+		} else {
+			r--
+		}
+
+	}
 
 	images := make([]*image.Paletted, 0)
 
-	rows, cols := getRowsandCols()
-	file := getMaze(rows, cols)
+	for i := 0; i < loops; i++ {
+		initialMazePath := <-mazePathChan
 
-	defer file.Close()
+		if solveMaze(initialMazePath, &images) {
+			fmt.Printf("Maze No. %v was solved (%v dead ends)\n", i, len(images))
+		} else {
+			fmt.Println("Maze was not solved.")
+		}
 
-	mazeGif, err := gif.Decode(file)
+		sliceLen := len(images)
+
+		counts[sliceLen] = counts[sliceLen] + 1
+		if sliceLen > longestSlice {
+			gifFile, err := os.Create("longSolvedInMotion.gif")
+			if err != nil {
+				log.Fatal(err)
+			}
+			solvedMotion := makeGIF(&images)
+			gif.EncodeAll(gifFile, &solvedMotion)
+			longestSlice = sliceLen
+			gifFile.Close()
+		}
+		if sliceLen < shortestSlice {
+			gifFile, err := os.Create("shortSolvedInMotion.gif")
+			if err != nil {
+				log.Fatal(err)
+			}
+			solvedMotion := makeGIF(&images)
+			gif.EncodeAll(gifFile, &solvedMotion)
+			shortestSlice = sliceLen
+			gifFile.Close()
+		}
+		images = nil
+	}
+
+	for key, val := range counts {
+		fmt.Printf("Len: %v; count: %v\n", key, val)
+	}
+
+	fmt.Printf("Shortest trek: %v wrong turns.\n", shortestSlice)
+	fmt.Printf("Longest trek: %v wrong turns.\n", longestSlice)
+
+}
+
+func getLoopNum() int {
+	fmt.Print("How many loops? ")
+	stdreader := bufio.NewReader(os.Stdin)
+	lines, err := stdreader.ReadString('\n')
 	if err != nil {
 		log.Fatal(err)
 	}
+	loops, err := strconv.Atoi(strings.Trim(lines, " \n\t"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return loops
+}
+
+func initializeGlobals() {
+	mazeGetThrottle = make(chan struct{}, 2)
+	mazePathChan = make(chan mazePath)
+	solvedNameChannel = serialNamer()
+	timer = func() chan struct{} {
+		c := make(chan struct{})
+		go func() {
+			for {
+				time.Sleep(1000)
+				c <- struct{}{}
+			}
+		}()
+		return c
+	}()
+}
+
+func getMazePath(size int) {
+	mazeGetThrottle <- struct{}{}
+	<-timer
+
+	mazeGif := getMaze(size, size)
 
 	initialMazeImage := rgbaToPalette(trimMaze(mazeGif))
 
 	initialMaze := firstMazePath(initialMazeImage)
 
-	if solveMaze(initialMaze, &images) {
-		fmt.Println("Maze was solved.")
-	} else {
-		fmt.Println("Maze was not solved.")
-	}
+	mazePathChan <- initialMaze
+	<-mazeGetThrottle
+}
 
-	fmt.Printf("Len(images: %v\n", len(images))
-
-	//	saveImageAsGif(images[len(images)-1], "solved.gif")
-	solvedMotion := makeGIF(&images)
-	gifFile, err := os.Create("serial_motionSolve.gif")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer gifFile.Close()
-	gif.EncodeAll(gifFile, &solvedMotion)
-
+func serialNamer() chan string {
+	num := 0
+	retChan := make(chan string)
+	go func(c chan string) {
+		for {
+			c <- fmt.Sprintf("motionSolved_%v.gif", num)
+			num++
+		}
+	}(retChan)
+	return retChan
 }
 
 func makeGIF(images *[]*image.Paletted) gif.GIF {
@@ -450,7 +542,7 @@ func getBkgColorLineColor(i *image.Paletted) (bkgColor, lineColor color.RGBA) {
 	}
 	return
 }
-func getMaze(rows, cols int) *os.File {
+func getMaze(rows, cols int) image.Image {
 
 	client := &http.Client{}
 
@@ -513,20 +605,12 @@ func getMaze(rows, cols int) *os.File {
 		log.Fatal(err)
 	}
 
-	file, err := os.Create("./maze.gif")
+	image, err := gif.Decode(mazeResp.Body)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	defer file.Close()
-
-	_, err = io.Copy(file, mazeResp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	file, err = os.Open("./maze.gif")
-	return file
+	return image
 
 }
 
